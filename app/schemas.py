@@ -197,6 +197,46 @@ class ExcursionsOut(BaseModel):
     events: list[ExcursionEventOut]
 
 
+class ExposureBudgetDimensionOut(BaseModel):
+    dimension: ExcursionDimension
+    budget: float = Field(
+        ..., description="该维越界剂量预算（温度 °C·秒 / 湿度 %RH·秒），非负"
+    )
+    cumulative_dose: float = Field(
+        ..., description="查询窗末累计越界剂量（断档区间不计入）"
+    )
+    remaining: float = Field(
+        ..., description="剩余额度（budget − cumulative_dose；超出预算时为负）"
+    )
+    budget_exhausted: bool = Field(
+        ..., description="窗内累计剂量是否已达到预算"
+    )
+    exhausted_ts: dt.datetime | None = Field(
+        None,
+        description=(
+            "首次达到预算的精确时刻（在线段内按越界幅度线性变化反解）；"
+            "零预算在该维首次越界起点耗尽；窗末仍未达到预算为 null"
+        ),
+    )
+
+
+class ExposureBudgetOut(BaseModel):
+    device_sn: str
+    start: dt.datetime | None = Field(None, description="实际生效的起始过滤（UTC），未指定为 null")
+    end: dt.datetime | None = Field(None, description="实际生效的结束过滤（UTC），未指定为 null")
+    max_gap_seconds: float = Field(..., description="生效的最大采样间隔（秒）")
+    temp_min: float | None = None
+    temp_max: float | None = None
+    humidity_min: float | None = None
+    humidity_max: float | None = None
+    temp_budget: float | None = Field(None, description="温度剂量预算（未配置该维为 null）")
+    humidity_budget: float | None = Field(None, description="湿度剂量预算（未配置该维为 null）")
+    sample_count: int = Field(..., description="过滤后参与计算的读数数量")
+    dimensions: list[ExposureBudgetDimensionOut] = Field(
+        ..., description="各维累计剂量与预算状态（temperature 在前）"
+    )
+
+
 IncidentDirection = Literal["up", "down", "flat"]
 
 

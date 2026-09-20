@@ -18,6 +18,8 @@ from .schemas import (
     AnchorIn,
     ExcursionEventOut,
     ExcursionsOut,
+    ExposureBudgetDimensionOut,
+    ExposureBudgetOut,
     IncidentBoundaryOut,
     IncidentOut,
     IncidentsOut,
@@ -510,6 +512,60 @@ def build_case_excursions(
                 peak_humidity_ts=e.peak_humidity_ts,
             )
             for e in events
+        ],
+    )
+
+
+# ---------- 累计剂量预算 ----------
+
+
+def build_case_exposure_budget(
+    db: Session,
+    device_sn: str,
+    start: dt.datetime | None,
+    end: dt.datetime | None,
+    thresholds: exc.Thresholds,
+    budgets: dict[str, float],
+    max_gap_seconds: float,
+) -> ExposureBudgetOut | None:
+    """窗末累计越界剂量、剩余额度与首次达到预算时刻（只读，不落库）。
+
+    设备没有任何读数时返回 ``None``（由上层判 404）；有读数但过滤后
+    为空范围时返回各维零累计、预算未耗尽。阈值交点与断档规则与
+    :func:`build_case_excursions` 完全一致。
+    """
+    all_samples = _load_samples(db, device_sn)
+    if not all_samples:
+        return None
+    samples = all_samples
+    if start is not None:
+        samples = [s for s in samples if s.ts >= start]
+    if end is not None:
+        samples = [s for s in samples if s.ts <= end]
+
+    result = exc.compute_exposure_budget(samples, thresholds, budgets, max_gap_seconds)
+    return ExposureBudgetOut(
+        device_sn=device_sn,
+        start=start,
+        end=end,
+        max_gap_seconds=max_gap_seconds,
+        temp_min=thresholds.temp_min,
+        temp_max=thresholds.temp_max,
+        humidity_min=thresholds.humidity_min,
+        humidity_max=thresholds.humidity_max,
+        temp_budget=budgets.get(exc.TEMPERATURE),
+        humidity_budget=budgets.get(exc.HUMIDITY),
+        sample_count=len(samples),
+        dimensions=[
+            ExposureBudgetDimensionOut(
+                dimension=d.dimension,
+                budget=d.budget,
+                cumulative_dose=d.cumulative_dose,
+                remaining=d.remaining,
+                budget_exhausted=d.exhausted_ts is not None,
+                exhausted_ts=d.exhausted_ts,
+            )
+            for d in result.dimensions
         ],
     )
 
