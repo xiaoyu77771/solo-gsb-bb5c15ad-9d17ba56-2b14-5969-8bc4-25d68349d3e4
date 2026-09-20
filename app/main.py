@@ -19,6 +19,7 @@ from .schemas import (
     BatchIngest,
     CaseOut,
     ExcursionsOut,
+    ExposureBudgetOut,
     HealthOut,
     IncidentsOut,
     IngestResponse,
@@ -54,7 +55,7 @@ app = FastAPI(
         "时间线重放、锚点校准与无写库重放预览；并提供基于线性插值的"
         "越界剂量（excursion dose）事件查询。"
     ),
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -266,6 +267,87 @@ def get_excursions(
 
     out = services.build_case_excursions(
         db, device_sn, start_utc, end_utc, thresholds, max_gap
+    )
+    if out is None:
+        raise HTTPException(status_code=404, detail="展柜不存在或尚无读数")
+    return out
+
+
+@app.get(
+    "/api/v1/cases/{device_sn}/exposure-budget",
+    response_model=ExposureBudgetOut,
+    tags=["cases"],
+    summary="越界剂量预算：分维窗末累计剂量、剩余额度与预算首次耗尽的精确时刻",
+)
+def get_exposure_budget(
+    device_sn: str,
+    start: dt.datetime | None = Query(None, description="起始时间（含），ISO8601"),
+    end: dt.datetime | None = Query(None, description="结束时间（含），ISO8601"),
+    temp_min: float | None = Query(None, ge=-50.0, le=100.0, description="温度下限（°C）"),
+    temp_max: float | None = Query(None, ge=-50.0, le=100.0, description="温度上限（°C）"),
+    humidity_min: float | None = Query(None, ge=0.0, le=100.0, description="湿度下限（%RH）"),
+    humidity_max: float | None = Query(None, ge=0.0, le=100.0, description="湿度上限（%RH）"),
+    temp_max_budget: float | None = Query(
+        None,
+        ge=0.0,
+        description="温度上限越界剂量预算（°C·秒），与 temp_max 同时提供方生效",
+    ),
+    temp_min_budget: float | None = Query(
+        None,
+        ge=0.0,
+        description="温度下限越界剂量预算（°C·秒），与 temp_min 同时提供方生效",
+    ),
+    humidity_max_budget: float | None = Query(
+        None,
+        ge=0.0,
+        description="湿度上限越界剂量预算（%RH·秒），与 humidity_max 同时提供方生效",
+    ),
+    humidity_min_budget: float | None = Query(
+        None,
+        ge=0.0,
+        description="湿度下限越界剂量预算（%RH·秒），与 humidity_min 同时提供方生效",
+    ),
+    max_gap: float = Query(
+        600.0,
+        gt=0.0,
+        le=86400.0,
+        description="允许的最大采样间隔（秒）；超过则曲线断开，未知区间不计剂量",
+    ),
+    db: Session = Depends(get_db),
+):
+    start_utc = _parse_ts(start)
+    end_utc = _parse_ts(end)
+    if start_utc is not None and end_utc is not None and start_utc > end_utc:
+        raise HTTPException(status_code=422, detail="start 不能晚于 end")
+    if temp_min is not None and temp_max is not None and temp_min > temp_max:
+        raise HTTPException(status_code=422, detail="temp_min 不能大于 temp_max")
+    if humidity_min is not None and humidity_max is not None and humidity_min > humidity_max:
+        raise HTTPException(status_code=422, detail="humidity_min 不能大于 humidity_max")
+
+    # 仅“阈值与预算同时提供”的组合参与计算
+    budgets: dict[tuple[str, str], float] = {}
+    if temp_max is not None and temp_max_budget is not None:
+        budgets[("temperature", "max")] = temp_max_budget
+    if temp_min is not None and temp_min_budget is not None:
+        budgets[("temperature", "min")] = temp_min_budget
+    if humidity_max is not None and humidity_max_budget is not None:
+        budgets[("humidity", "max")] = humidity_max_budget
+    if humidity_min is not None and humidity_min_budget is not None:
+        budgets[("humidity", "min")] = humidity_min_budget
+    if not budgets:
+        raise HTTPException(
+            status_code=422,
+            detail="至少提供一个“阈值及其对应预算”组合（如 temp_max 与 temp_max_budget）",
+        )
+
+    thresholds = Thresholds(
+        temp_min=temp_min,
+        temp_max=temp_max,
+        humidity_min=humidity_min,
+        humidity_max=humidity_max,
+    )
+    out = services.build_case_exposure_budget(
+        db, device_sn, start_utc, end_utc, thresholds, budgets, max_gap
     )
     if out is None:
         raise HTTPException(status_code=404, detail="展柜不存在或尚无读数")

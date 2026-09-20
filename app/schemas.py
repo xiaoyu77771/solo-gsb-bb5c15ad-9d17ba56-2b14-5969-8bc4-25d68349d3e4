@@ -197,6 +197,55 @@ class ExcursionsOut(BaseModel):
     events: list[ExcursionEventOut]
 
 
+BudgetThresholdKind = Literal["max", "min"]
+
+
+class ExposureBudgetDimensionOut(BaseModel):
+    dimension: ExcursionDimension = Field(..., description="维度：temperature（°C·秒）/ humidity（%RH·秒）")
+    threshold_kind: BudgetThresholdKind = Field(
+        ..., description="预算绑定的阈值方向：max 为上限越界（v > 阈值），min 为下限越界（v < 阈值）"
+    )
+    threshold: float = Field(..., description="该维度预算绑定的阈值")
+    budget: float = Field(..., description="该维剂量预算（量纲·秒）")
+    accumulated_dose: float = Field(
+        ..., description="查询窗末该维累计越界剂量（跨断档不累计）"
+    )
+    remaining: float = Field(
+        ..., description="剩余额度 budget - accumulated_dose；为负表示已超支"
+    )
+    exhausted: bool = Field(..., description="窗内累计剂量是否曾达到预算")
+    exhausted_ts: dt.datetime | None = Field(
+        None,
+        description=(
+            "累计剂量首次达到预算的精确时刻（在线段内按越界幅度线性变化反解）；"
+            "零预算在该维首次越界起点耗尽；窗内未耗尽为 null"
+        ),
+    )
+
+
+class ExposureBudgetOut(BaseModel):
+    device_sn: str
+    start: dt.datetime | None = Field(None, description="实际生效的起始过滤（UTC），未指定为 null")
+    end: dt.datetime | None = Field(None, description="实际生效的结束过滤（UTC），未指定为 null")
+    max_gap_seconds: float = Field(..., description="生效的最大采样间隔（秒）")
+    temp_min: float | None = None
+    temp_max: float | None = None
+    humidity_min: float | None = None
+    humidity_max: float | None = None
+    temp_max_budget: float | None = Field(None, description="温度上限越界剂量预算（°C·秒）")
+    temp_min_budget: float | None = Field(None, description="温度下限越界剂量预算（°C·秒）")
+    humidity_max_budget: float | None = Field(None, description="湿度上限越界剂量预算（%RH·秒）")
+    humidity_min_budget: float | None = Field(None, description="湿度下限越界剂量预算（%RH·秒）")
+    sample_count: int = Field(..., description="过滤后参与计算的读数数量")
+    dimensions: list[ExposureBudgetDimensionOut] = Field(
+        ...,
+        description=(
+            "每个“阈值及其对应预算”组合一个结果，固定顺序："
+            "temp_max、temp_min、humidity_max、humidity_min"
+        ),
+    )
+
+
 IncidentDirection = Literal["up", "down", "flat"]
 
 

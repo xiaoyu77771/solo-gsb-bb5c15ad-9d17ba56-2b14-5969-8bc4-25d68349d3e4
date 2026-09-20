@@ -4,7 +4,8 @@
 分析服务。客户端按 **设备序号 + 时间戳** 批量上报温度、湿度读数；服务对每个
 展柜独立执行**带惩罚项的确定性变点分段**，自动合并同序号重复上报，支持迟到
 读数补入后的时间线重放、锚点校准与“不落库”的重放预览；并提供基于
-**线性插值阈值交点**的越界剂量（excursion dose）事件查询，以及基于各展柜
+**线性插值阈值交点**的越界剂量（excursion dose）事件查询与分维**剂量预算**
+（累计量 / 剩余额度 / 预算首次耗尽的精确时刻），以及基于各展柜
 非基线段首的**跨展柜共模突变**（common-mode incident）检测。
 
 ---
@@ -103,6 +104,34 @@ new_mean = (old_mean × report_count + value) / (report_count + 1)
 - 至少需配置一个上下限；`temp_min > temp_max`、`humidity_min > humidity_max`、
   `start > end`、`max_gap ≤ 0` 均返回 `422`。
 
+### 6b. 越界剂量预算
+
+`GET /api/v1/cases/{sn}/exposure-budget` 在与越界事件**完全相同的分段线性
+曲线、插值交点与 `max_gap` 断档规则**上，按**“阈值及其对应预算”组合**逐维
+累计越界剂量，回答“这个查询窗内各维度用掉了多少额度、还剩多少、预算是在
+哪个精确时刻耗尽的”：
+
+- 四个可配组合：`temp_max` + `temp_max_budget`（温度上限）、`temp_min` +
+  `temp_min_budget`（温度下限）、`humidity_max` + `humidity_max_budget`、
+  `humidity_min` + `humidity_min_budget`；阈值与预算**必须成对提供**才会
+  计算该维，只给阈值或只给预算的一方会被忽略。维度顺序固定为
+  temp_max → temp_min → humidity_max → humidity_min。
+- 相邻读数间隔**大于** `max_gap` 时不跨断档累计线段面积（与事件查询一致）。
+- 每个维度返回：
+  - `accumulated_dose`：窗末累计越界剂量；
+  - `remaining = budget − accumulated_dose`：剩余额度（**为负表示已超支**）；
+  - `exhausted_ts`：累计剂量**首次达到预算的精确时刻**——按片段时间顺序
+    累加，命中的梯形片段内越界幅度线性变化 ``e(u) = e0 + (e1−e0)·u``，
+    对累计面积 ``e0·u + ½(e1−e0)·u² = 剩余预算/片段时长`` 反解一元二次
+    方程得到交点时刻（恒落在越界线段之内）；
+  - **零预算**在该维**首次越界起点**（阈值交点，越界幅度为零处；若窗首
+    读数已在阈值外，则为窗首）即耗尽。
+- `start` / `end` 为含端点过滤，剂量只基于过滤后范围内的曲线；窗内无读数时
+  各维累计为零、预算不耗尽。
+- 没有提供任何完整的“阈值 + 预算”组合、任一预算为负、同一维度下限大于
+  上限、`start > end`、`max_gap ≤ 0`、阈值超出量程均返回 `422`；
+  展柜不存在（没有任何读数）返回 `404`。
+
 ### 7. 跨展柜共模突变
 
 `GET /api/v1/incidents` 把**各展柜现有有效分段**（已落库快照；尚未重放的
@@ -148,6 +177,7 @@ new_mean = (old_mean × report_count + value) / (report_count + 1)
 | GET  | `/api/v1/cases/{sn}/segments` | 查询分段，支持 `start` / `end` 时间过滤 |
 | GET  | `/api/v1/cases/{sn}/timeline?max_points=...` | 时间线降采样读数，支持 `start` / `end` 时间过滤 |
 | GET  | `/api/v1/cases/{sn}/excursions` | 越界剂量事件：线性插值交点、分维剂量积分、`max_gap` 断开 |
+| GET  | `/api/v1/cases/{sn}/exposure-budget` | 越界剂量预算：分维窗末累计量、剩余额度与预算首次耗尽的精确时刻 |
 | GET  | `/api/v1/incidents` | 跨展柜共模突变：非基线段首候选窗 + 全局最优互不重叠选择 |
 | POST | `/api/v1/anchors` | 登记/更新锚点并重放 |
 | GET  | `/api/v1/cases/{sn}/anchors` | 查询锚点及对齐情况 |
@@ -297,6 +327,67 @@ curl 'http://localhost:8080/api/v1/cases/CASE-007/excursions?temp_max=26&humidit
 `humidity_dose` 为事件内各维越界幅度对时间的累计积分；未触发某维度时对应
 剂量为 `0`、峰值字段为 `null`。
 
+### 越界剂量预算查询
+
+```bash
+curl 'http://localhost:8080/api/v1/cases/CASE-007/exposure-budget?temp_max=26&temp_max_budget=6000&humidity_max=65&humidity_max_budget=20000&max_gap=600&start=2026-09-01T00:00:00Z&end=2026-09-02T00:00:00Z'
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `start` / `end` | 不限 | 含端点的 ISO8601 过滤；剂量只基于过滤后范围内的分段线性曲线 |
+| `temp_min` / `temp_max` | 不限 | 温度下/上限（°C，−50…100） |
+| `humidity_min` / `humidity_max` | 不限 | 湿度下/上限（%RH，0…100） |
+| `temp_min_budget` / `temp_max_budget` | 不限 | 对应温度下/上限的越界剂量预算（°C·秒，**≥ 0**） |
+| `humidity_min_budget` / `humidity_max_budget` | 不限 | 对应湿度下/上限的越界剂量预算（%RH·秒，**≥ 0**） |
+| `max_gap` | `600` | 允许的最大采样间隔（秒，0 < x ≤ 86400）；超过则断开，未知区间不计剂量 |
+
+阈值与预算**成对出现**才构成一个计算维度（如只传 `temp_max=26` 而不传
+`temp_max_budget`，该方向不参与计算）；四个组合一个都不完整时返回 `422`。
+响应示例（温度预算已在窗内耗尽、湿度尚有余量）：
+
+```json
+{
+  "device_sn": "CASE-007",
+  "start": "2026-09-01T00:00:00Z",
+  "end": "2026-09-02T00:00:00Z",
+  "max_gap_seconds": 600.0,
+  "temp_min": null, "temp_max": 26.0,
+  "humidity_min": null, "humidity_max": 65.0,
+  "temp_max_budget": 6000.0,
+  "temp_min_budget": null,
+  "humidity_max_budget": 20000.0,
+  "humidity_min_budget": null,
+  "sample_count": 4,
+  "dimensions": [
+    {
+      "dimension": "temperature",
+      "threshold_kind": "max",
+      "threshold": 26.0,
+      "budget": 6000.0,
+      "accumulated_dose": 6750.0,
+      "remaining": -750.0,
+      "exhausted": true,
+      "exhausted_ts": "2026-09-01T00:14:30Z"
+    },
+    {
+      "dimension": "humidity",
+      "threshold_kind": "max",
+      "threshold": 65.0,
+      "budget": 20000.0,
+      "accumulated_dose": 13500.0,
+      "remaining": 6500.0,
+      "exhausted": false,
+      "exhausted_ts": null
+    }
+  ]
+}
+```
+
+`exhausted_ts` 是累计剂量首次达到预算的精确时刻，在命中的越界线段内按越界
+幅度线性变化反解；零预算在该维首次越界起点（阈值交点）即耗尽。展柜没有
+读数返回 `404`，过滤后为空范围返回 `200` 与各维零累计。
+
 ### 跨展柜共模突变查询
 
 ```bash
@@ -381,6 +472,10 @@ python -m pytest -q
 `minimum_required`、确定性 LTTB、`start` / `end` 过滤后的极值与预算），以及
 **越界剂量**（线性插值交点精确性、三角/矩形剂量积分、`max_gap` 断开与未知
 区间剔除、跨维度事件合并、参数校验 422 与空范围/未知设备），以及
+**越界剂量预算**（窗末累计量与剩余额度、零预算在首次越界起点耗尽、
+线段内按越界幅度线性反解预算耗尽时刻——含上升/下降/矩形/跨片段命中、
+断档不累计、时间窗裁剪、固定维度顺序、缺“阈值+预算”组合/负预算/
+`start>end` 等 422 与未知展柜 404），以及
 **跨展柜共模突变**（连续候选窗枚举、容差含等于、同展柜保留最大幅度/并列
 取更早、`min_devices` 过滤、动态规划全局最优相对贪心链式归并的差异、
 起始时间序列并列规则、严格互不重叠、方向判定、参数校验 422 与空库/空范围）。

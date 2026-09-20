@@ -18,6 +18,8 @@ from .schemas import (
     AnchorIn,
     ExcursionEventOut,
     ExcursionsOut,
+    ExposureBudgetDimensionOut,
+    ExposureBudgetOut,
     IncidentBoundaryOut,
     IncidentOut,
     IncidentsOut,
@@ -511,6 +513,82 @@ def build_case_excursions(
             )
             for e in events
         ],
+    )
+
+
+# ---------- 维度剂量预算 ----------
+
+# 固定输出顺序：(维度, 阈值方向) → 阈值属性、预算属性
+_BUDGET_ORDER = (
+    (exc.TEMPERATURE, "max", "temp_max"),
+    (exc.TEMPERATURE, "min", "temp_min"),
+    (exc.HUMIDITY, "max", "humidity_max"),
+    (exc.HUMIDITY, "min", "humidity_min"),
+)
+
+
+def build_case_exposure_budget(
+    db: Session,
+    device_sn: str,
+    start: dt.datetime | None,
+    end: dt.datetime | None,
+    thresholds: exc.Thresholds,
+    budgets: dict[tuple[str, str], float],
+    max_gap_seconds: float,
+) -> ExposureBudgetOut | None:
+    """各维累计越界剂量与预算耗尽时刻（只读计算，不落库）。
+
+    ``budgets`` 的键为 ``(dimension, "max"/"min")``，只对同时提供了
+    阈值与非负预算的组合计算。设备没有任何读数时返回 ``None``
+    （由上层判 404）；有读数但过滤后为空范围时各维累计剂量为零。
+    剂量只基于过滤后范围内的分段线性曲线，跨断档不累计。
+    """
+    all_samples = _load_samples(db, device_sn)
+    if not all_samples:
+        return None
+    samples = all_samples
+    if start is not None:
+        samples = [s for s in samples if s.ts >= start]
+    if end is not None:
+        samples = [s for s in samples if s.ts <= end]
+
+    dims: list[ExposureBudgetDimensionOut] = []
+    for dimension, kind, attr in _BUDGET_ORDER:
+        threshold = getattr(thresholds, attr)
+        budget = budgets.get((dimension, kind))
+        if threshold is None or budget is None:
+            continue
+        result = exc.dimension_budget(
+            samples, dimension, kind, threshold, budget, max_gap_seconds
+        )
+        dims.append(
+            ExposureBudgetDimensionOut(
+                dimension=result.dimension,
+                threshold_kind=result.threshold_kind,
+                threshold=result.threshold,
+                budget=result.budget,
+                accumulated_dose=result.dose,
+                remaining=result.remaining,
+                exhausted=result.exhausted,
+                exhausted_ts=result.exhausted_ts,
+            )
+        )
+
+    return ExposureBudgetOut(
+        device_sn=device_sn,
+        start=start,
+        end=end,
+        max_gap_seconds=max_gap_seconds,
+        temp_min=thresholds.temp_min,
+        temp_max=thresholds.temp_max,
+        humidity_min=thresholds.humidity_min,
+        humidity_max=thresholds.humidity_max,
+        temp_max_budget=budgets.get((exc.TEMPERATURE, "max")),
+        temp_min_budget=budgets.get((exc.TEMPERATURE, "min")),
+        humidity_max_budget=budgets.get((exc.HUMIDITY, "max")),
+        humidity_min_budget=budgets.get((exc.HUMIDITY, "min")),
+        sample_count=len(samples),
+        dimensions=dims,
     )
 
 
